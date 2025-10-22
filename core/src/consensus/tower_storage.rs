@@ -409,6 +409,11 @@ pub mod test {
             last_vote_tx_blockhash: BlockhashStatus::Uninitialized,
             stray_restored_slot: Some(2),
             last_switch_threshold_check: Option::default(),
+            mostly_confirmed_threshold: None,
+            threshold_ahead_count: None,
+            after_skip_threshold: None,
+            threshold_escape_count: None,
+            last_config_check_seconds: 0,
         };
 
         {
