@@ -2683,7 +2683,7 @@ impl ReplayStage {
                 rooted_banks.push(root_bank.clone());
                 let rooted_slots: Vec<_> = rooted_banks.iter().map(|bank| bank.slot()).collect();
                 // The following differs from  rooted_slots by including the parent slot of the oldest parent bank.
-                let rooted_slots_with_parents = bank_notification_sender
+                let _rooted_slots_with_parents = bank_notification_sender
                     .as_ref()
                     .is_some_and(|sender| sender.should_send_parents)
                     .then(|| {
@@ -2691,8 +2691,6 @@ impl ReplayStage {
                         new_chain.push(oldest_parent.unwrap_or_else(|| bank.parent_slot()));
                         new_chain
                     });
-
-
 
                 // Call leader schedule_cache.set_root() before blockstore.set_root() because
                 // bank_forks.root is consumed by repair_service to update gossip, so we don't want to
