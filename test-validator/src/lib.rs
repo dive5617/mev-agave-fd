@@ -1044,6 +1044,7 @@ impl TestValidator {
                 advertised_ip: bind_ip_addr,
                 public_tpu_addr: None,
                 public_tpu_forwards_addr: None,
+                public_tvu_addr: None,
                 num_tvu_receive_sockets: NonZero::new(1).unwrap(),
                 num_tvu_retransmit_sockets: NonZero::new(1).unwrap(),
                 num_quic_endpoints: NonZero::new(DEFAULT_QUIC_ENDPOINTS)

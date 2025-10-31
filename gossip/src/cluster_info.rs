@@ -427,6 +427,17 @@ impl ClusterInfo {
         Ok(())
     }
 
+    pub fn set_tvu_socket(&self,
+        protocol: contact_info::Protocol,
+        tvu_addr: SocketAddr) -> Result<(), ContactInfoError> {
+        self.my_contact_info
+            .write()
+            .unwrap()
+            .set_tvu(protocol, tvu_addr)?;
+        self.refresh_my_gossip_contact_info();
+        Ok(())
+    }
+
     pub fn lookup_contact_info<R>(
         &self,
         id: &Pubkey,
@@ -2467,6 +2478,7 @@ pub struct NodeConfig {
     pub bind_ip_addrs: Arc<BindIpAddrs>,
     pub public_tpu_addr: Option<SocketAddr>,
     pub public_tpu_forwards_addr: Option<SocketAddr>,
+    pub public_tvu_addr: Option<SocketAddr>,
     pub vortexor_receiver_addr: Option<SocketAddr>,
 
     /// The number of TVU receive sockets to create
@@ -2716,7 +2728,7 @@ mod tests {
         solana_logger::setup();
         let cluster_info = Arc::new({
             let keypair = Arc::new(Keypair::new());
-            let node = Node::new_localhost_with_pubkey(&keypair.pubkey());
+            let node = Node::new_localhost_with_pubkey(&keypair.pubkey(), 9001, 8003);
             ClusterInfo::new(node.info, keypair, SocketAddrSpace::Unspecified)
         });
         let entrypoint_pubkey = solana_pubkey::new_rand();
@@ -2852,7 +2864,7 @@ mod tests {
         let (spy, _, _) = ClusterInfo::spy_node(solana_pubkey::new_rand(), 0);
         let cluster_info = Arc::new({
             let keypair = Arc::new(Keypair::new());
-            let node = Node::new_localhost_with_pubkey(&keypair.pubkey());
+            let node = Node::new_localhost_with_pubkey(&keypair.pubkey(), 9001, 8003);
             ClusterInfo::new(node.info, keypair, SocketAddrSpace::Unspecified)
         });
         cluster_info.insert_info(spy);
@@ -2945,13 +2957,14 @@ mod tests {
             bind_ip_addrs: Arc::new(BindIpAddrs::new(vec![IpAddr::V4(ip)]).unwrap()),
             public_tpu_addr: None,
             public_tpu_forwards_addr: None,
+            public_tvu_addr: None,
             num_tvu_receive_sockets: MINIMUM_NUM_TVU_RECEIVE_SOCKETS,
             num_tvu_retransmit_sockets: MINIMUM_NUM_TVU_RECEIVE_SOCKETS,
             num_quic_endpoints: DEFAULT_NUM_QUIC_ENDPOINTS,
             vortexor_receiver_addr: None,
         };
 
-        let node = Node::new_with_external_ip(&solana_pubkey::new_rand(), config);
+        let node = Node::new_with_external_ip(&solana_pubkey::new_rand(), config, 9001, 8003);
 
         check_node_sockets(&node, IpAddr::V4(ip), port_range);
     }
@@ -2970,13 +2983,14 @@ mod tests {
             bind_ip_addrs: Arc::new(BindIpAddrs::new(vec![ip]).unwrap()),
             public_tpu_addr: None,
             public_tpu_forwards_addr: None,
+            public_tvu_addr: None,
             num_tvu_receive_sockets: MINIMUM_NUM_TVU_RECEIVE_SOCKETS,
             num_tvu_retransmit_sockets: MINIMUM_NUM_TVU_RECEIVE_SOCKETS,
             num_quic_endpoints: DEFAULT_NUM_QUIC_ENDPOINTS,
             vortexor_receiver_addr: None,
         };
 
-        let node = Node::new_with_external_ip(&solana_pubkey::new_rand(), config);
+        let node = Node::new_with_external_ip(&solana_pubkey::new_rand(), config, 9001, 8003);
 
         check_node_sockets(&node, ip, port_range);
         check_sockets(&node.sockets.gossip, ip, port_range);
@@ -3639,7 +3653,7 @@ mod tests {
     #[test]
     fn test_get_duplicate_shreds() {
         let host1_key = Arc::new(Keypair::new());
-        let node = Node::new_localhost_with_pubkey(&host1_key.pubkey());
+        let node = Node::new_localhost_with_pubkey(&host1_key.pubkey(), 9001, 8003);
         let cluster_info = Arc::new(ClusterInfo::new(
             node.info,
             host1_key.clone(),
@@ -3859,12 +3873,12 @@ mod tests {
         );
 
         let cluster_info44 = Arc::new({
-            let node = Node::new_localhost_with_pubkey(&keypair44.pubkey());
+            let node = Node::new_localhost_with_pubkey(&keypair44.pubkey(), 9001, 8003);
             info!("{node:?}");
             ClusterInfo::new(node.info, keypair44.clone(), SocketAddrSpace::Unspecified)
         });
         let cluster_info43 = Arc::new({
-            let node = Node::new_localhost_with_pubkey(&keypair43.pubkey());
+            let node = Node::new_localhost_with_pubkey(&keypair43.pubkey(), 9001, 8003);
             ClusterInfo::new(node.info, keypair43.clone(), SocketAddrSpace::Unspecified)
         });
 
