@@ -55,6 +55,7 @@ impl Node {
             advertised_ip: bind_ip_addr,
             public_tpu_addr: None,
             public_tpu_forwards_addr: None,
+            public_tvu_addr: None,
             num_tvu_receive_sockets: NonZero::new(1).unwrap(),
             num_tvu_retransmit_sockets: NonZero::new(1).unwrap(),
             num_quic_endpoints: NonZero::new(DEFAULT_QUIC_ENDPOINTS)
@@ -86,6 +87,7 @@ impl Node {
             advertised_ip: bind_ip_addr,
             public_tpu_addr: None,
             public_tpu_forwards_addr: None,
+            public_tvu_addr: None,
             num_tvu_receive_sockets: NonZero::new(1).unwrap(),
             num_tvu_retransmit_sockets: NonZero::new(1).unwrap(),
             num_quic_endpoints: NonZero::new(DEFAULT_QUIC_ENDPOINTS)
@@ -118,6 +120,7 @@ impl Node {
             bind_ip_addrs,
             public_tpu_addr,
             public_tpu_forwards_addr,
+            public_tvu_addr,
             num_tvu_receive_sockets,
             num_tvu_retransmit_sockets,
             num_quic_endpoints,
@@ -272,8 +275,10 @@ impl Node {
         info.set_gossip((advertised_ip, gossip_ports[0])).unwrap();
         // FIREDANCER: The port we receive shreds on is determined by the Firedancer config,
         // not whatever port Solana Labs manages to bind.
-        info.set_tvu(UDP, (advertised_ip, firedancer_tvu_port)).unwrap();
-        info.set_tvu(QUIC, (advertised_ip, firedancer_tvu_port)).unwrap();
+        let tvu_addr = public_tvu_addr.unwrap_or_else(|| SocketAddr::new(advertised_ip, firedancer_tvu_port));
+        info.set_tvu(UDP, tvu_addr).unwrap();
+        // Use the same address for QUIC TVU, or calculate QUIC port if needed
+        info.set_tvu(QUIC, tvu_addr).unwrap();
         // FIREDANCER: The port we receive transactions on is determined by the Firedancer config,
         // not whatever port Solana Labs manages to bind.
         info.set_tpu(public_tpu_addr.unwrap_or_else(|| SocketAddr::new(advertised_ip, firedancer_tpu_port)))
