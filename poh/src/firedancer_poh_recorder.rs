@@ -13,6 +13,7 @@ use solana_poh_config::PohConfig;
 use std::ffi::c_void;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 use crate::poh_recorder::{PohLeaderStatus, WorkingBankEntry, SharedWorkingBank, SharedTickHeight, SharedLeaderFirstTickHeight};
 use crate::transaction_recorder::TransactionRecorder;
@@ -91,7 +92,8 @@ impl PohRecorder {
             0
         };
 
-        let target_tick_duration_nanos: u64 = poh_config.target_tick_duration.as_nanos().try_into().unwrap();
+        // Fixed target tick duration: 6850 microseconds
+        let target_tick_duration_nanos: u64 = Duration::from_micros(6150).as_nanos() as u64;
         let target_tick_duration_nanos: u64 = target_tick_duration_nanos.saturating_sub(adjustment_per_tick);
 
         unsafe { fd_ext_poh_initialize(target_tick_duration_nanos, poh_config.hashes_per_tick.unwrap_or(1), ticks_per_slot, tick_height, last_entry_hash.as_ref().as_ptr(), clear_bank_sender as *mut c_void) };
