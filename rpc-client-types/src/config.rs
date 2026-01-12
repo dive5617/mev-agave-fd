@@ -1,6 +1,6 @@
 use {
     crate::filter::RpcFilterType,
-    solana_account_decoder_client_types::{UiAccountEncoding, UiDataSliceConfig},
+    solana_account_decoder_client_types::{UiAccount, UiAccountEncoding, UiDataSliceConfig},
     solana_clock::{Epoch, Slot},
     solana_commitment_config::{CommitmentConfig, CommitmentLevel},
     solana_transaction_status_client_types::{TransactionDetails, UiTransactionEncoding},
@@ -44,6 +44,60 @@ pub struct RpcSimulateTransactionConfig {
     pub min_context_slot: Option<Slot>,
     #[serde(default)]
     pub inner_instructions: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcSimulateBundleAccountsConfig {
+    pub encoding: Option<UiAccountEncoding>,
+    pub addresses: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SimulationBank {
+    #[serde(rename = "tip")]
+    Tip,
+    Slot(Slot),
+    Commitment(CommitmentConfig),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcSimulateBundleConfig {
+    #[serde(default)]
+    pub sig_verify: bool,
+    #[serde(default)]
+    pub replace_recent_blockhash: bool,
+    #[serde(flatten)]
+    pub commitment: Option<CommitmentConfig>,
+    pub encoding: Option<UiTransactionEncoding>,
+    pub pre_execution_accounts_configs: Option<Vec<Option<RpcSimulateBundleAccountsConfig>>>,
+    pub post_execution_accounts_configs: Option<Vec<Option<RpcSimulateBundleAccountsConfig>>>,
+    pub min_context_slot: Option<Slot>,
+    #[serde(default)]
+    pub inner_instructions: bool,
+    pub simulation_bank: Option<SimulationBank>,
+    /// Account overrides to use during simulation.
+    /// Maps account pubkeys (as base58 strings) to their account states.
+    pub account_overrides: Option<std::collections::HashMap<String, UiAccount>>,
+}
+
+impl Default for RpcSimulateBundleConfig {
+    fn default() -> Self {
+        Self {
+            sig_verify: false,
+            replace_recent_blockhash: false,
+            commitment: None,
+            encoding: None,
+            pre_execution_accounts_configs: None,
+            post_execution_accounts_configs: None,
+            min_context_slot: None,
+            inner_instructions: false,
+            simulation_bank: None,
+            account_overrides: None,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]

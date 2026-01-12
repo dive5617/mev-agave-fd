@@ -414,6 +414,32 @@ pub struct RpcSimulateTransactionResult {
     pub loaded_addresses: Option<UiLoadedAddresses>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcSimulateBundleTransactionResult {
+    pub err: Option<UiTransactionError>,
+    pub logs: Option<Vec<String>>,
+    pub pre_execution_accounts: Option<Vec<Option<UiAccount>>>,
+    pub post_execution_accounts: Option<Vec<Option<UiAccount>>>,
+    pub units_consumed: Option<u64>,
+    pub loaded_accounts_data_size: Option<u32>,
+    pub return_data: Option<UiTransactionReturnData>,
+    pub inner_instructions: Option<Vec<UiInnerInstructions>>,
+    pub fee: Option<u64>,
+    pub pre_balances: Option<Vec<u64>>,
+    pub post_balances: Option<Vec<u64>>,
+    pub pre_token_balances: Option<Vec<UiTransactionTokenBalance>>,
+    pub post_token_balances: Option<Vec<UiTransactionTokenBalance>>,
+    pub loaded_addresses: Option<UiLoadedAddresses>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcSimulateBundleResult {
+    pub transactions: Vec<RpcSimulateBundleTransactionResult>,
+    pub err: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RpcStorageTurn {

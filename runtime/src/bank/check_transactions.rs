@@ -175,6 +175,7 @@ impl Bank {
         compute_budget: Result<SVMTransactionExecutionAndFeeBudgetLimits, TransactionError>,
     ) -> TransactionCheckResult {
         let recent_blockhash = tx.recent_blockhash();
+
         if let Some(hash_info) = hash_queue.get_hash_info_if_valid(recent_blockhash, max_age) {
             Ok(Self::checked_transactions_details_with_test_override(
                 None,

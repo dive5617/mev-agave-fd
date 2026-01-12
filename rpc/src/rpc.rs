@@ -51,7 +51,7 @@ use {
     solana_program_pack::Pack,
     solana_pubkey::{Pubkey, PUBKEY_BYTES},
     solana_rpc_client_api::{
-        config::*,
+        config::{RpcSimulateBundleConfig, SimulationBank, *},
         custom_error::RpcCustomError,
         filter::{Memcmp, RpcFilterType},
         request::{
@@ -61,7 +61,10 @@ use {
             MAX_GET_SLOT_LEADERS, MAX_MULTIPLE_ACCOUNTS,
             MAX_RPC_VOTE_ACCOUNT_INFO_EPOCH_CREDITS_HISTORY, NUM_LARGEST_ACCOUNTS,
         },
-        response::{Response as RpcResponse, *},
+        response::{
+            RpcSimulateBundleResult, RpcSimulateBundleTransactionResult,
+            Response as RpcResponse, *,
+        },
     },
     solana_runtime::{
         bank::{Bank, TransactionSimulationResult},
@@ -3517,6 +3520,14 @@ pub mod rpc_full {
             config: Option<RpcSimulateTransactionConfig>,
         ) -> Result<RpcResponse<RpcSimulateTransactionResult>>;
 
+        #[rpc(meta, name = "simulateBundle")]
+        fn simulate_bundle(
+            &self,
+            meta: Self::Metadata,
+            transactions: Vec<String>,
+            config: Option<RpcSimulateBundleConfig>,
+        ) -> Result<RpcResponse<RpcSimulateBundleResult>>;
+
         #[rpc(meta, name = "minimumLedgerSlot")]
         fn minimum_ledger_slot(&self, meta: Self::Metadata) -> Result<Slot>;
 
@@ -4087,6 +4098,428 @@ pub mod rpc_full {
                         balances.into_iter().map(|balance| solana_ledger::transaction_balances::svm_token_info_to_token_balance(balance).into()).collect()
                     }),
                     loaded_addresses: Some(UiLoadedAddresses::from(&transaction.get_loaded_addresses())),
+                },
+            ))
+        }
+
+        fn simulate_bundle(
+            &self,
+            meta: Self::Metadata,
+            transactions: Vec<String>,
+            config: Option<RpcSimulateBundleConfig>,
+        ) -> Result<RpcResponse<RpcSimulateBundleResult>> {
+            debug!("simulate_bundle rpc request received");
+            use solana_bundle::bundle_execution::load_and_execute_bundle;
+            use solana_svm::transaction_processing_result::ProcessedTransaction;
+
+            let RpcSimulateBundleConfig {
+                sig_verify,
+                replace_recent_blockhash,
+                commitment,
+                encoding,
+                pre_execution_accounts_configs,
+                post_execution_accounts_configs,
+                min_context_slot,
+                inner_instructions: enable_cpi_recording,
+                simulation_bank,
+                account_overrides: rpc_account_overrides,
+            } = config.unwrap_or_default();
+
+            if replace_recent_blockhash && sig_verify {
+                return Err(Error::invalid_params(
+                    "sigVerify may not be used with replaceRecentBlockhash",
+                ));
+            }
+
+            if transactions.is_empty() {
+                return Err(Error::invalid_params("Bundle must contain at least one transaction"));
+            }
+
+            let tx_encoding = encoding.unwrap_or(UiTransactionEncoding::Base58);
+            let binary_encoding = tx_encoding.into_binary_encoding().ok_or_else(|| {
+                Error::invalid_params(format!(
+                    "unsupported encoding: {tx_encoding}. Supported encodings: base58, base64"
+                ))
+            })?;
+
+            // Get bank based on simulation_bank parameter
+            let bank_arc = if let Some(sim_bank) = simulation_bank {
+                match sim_bank {
+                    SimulationBank::Tip => {
+                        // Use the latest bank (processed commitment)
+                        meta.get_bank_with_config(RpcContextConfig {
+                            commitment: Some(CommitmentConfig::processed()),
+                            min_context_slot,
+                        })?
+                    }
+                    SimulationBank::Slot(slot) => {
+                        // Get bank at specific slot
+                        let bank_forks = meta.bank_forks.read().unwrap();
+                        let bank_at_slot = bank_forks.get(slot).ok_or_else(|| {
+                            let root = bank_forks.root();
+                            let highest_slot = bank_forks.highest_slot();
+                            let highest_super_majority_root = meta
+                                .block_commitment_cache
+                                .read()
+                                .unwrap()
+                                .highest_super_majority_root();
+                            
+                            // Get all available bank slots
+                            let available_slots: Vec<Slot> = bank_forks
+                                .banks()
+                                .keys()
+                                .copied()
+                                .collect::<Vec<_>>();
+                            let available_slots_str = if available_slots.len() <= 20 {
+                                format!("{:?}", available_slots)
+                            } else {
+                                let mut sorted = available_slots.clone();
+                                sorted.sort();
+                                format!("[{} slots from {} to {}]", 
+                                    sorted.len(), 
+                                    sorted.first().unwrap_or(&0),
+                                    sorted.last().unwrap_or(&0))
+                            };
+                            
+                            Error::invalid_params(format!(
+                                "Bank at slot {slot} is not available. It may have been pruned or doesn't exist. \
+                                Current root: {}, highest slot: {}, highest super majority root: {}. \
+                                Available bank slots: {}. \
+                                Try using 'tip', a commitment level (confirmed/finalized), or one of the available slots.",
+                                root, highest_slot, highest_super_majority_root, available_slots_str
+                            ))
+                        })?;
+                        // Check min_context_slot if specified
+                        if let Some(min_slot) = min_context_slot {
+                            if bank_at_slot.slot() < min_slot {
+                                return Err(RpcCustomError::MinContextSlotNotReached {
+                                    context_slot: bank_at_slot.slot(),
+                                }
+                                .into());
+                            }
+                        }
+                        bank_at_slot
+                    }
+                    SimulationBank::Commitment(commitment_config) => {
+                        // Use bank at specified commitment level
+                        meta.get_bank_with_config(RpcContextConfig {
+                            commitment: Some(commitment_config),
+                            min_context_slot,
+                        })?
+                    }
+                }
+            } else {
+                // Default: use commitment from config or processed
+                meta.get_bank_with_config(RpcContextConfig {
+                    commitment,
+                    min_context_slot,
+                })?
+            };
+            let bank = &*bank_arc;
+
+            // Decode and sanitize all transactions
+            let mut sanitized_txs = Vec::new();
+            for (idx, data) in transactions.iter().enumerate() {
+                let (_, mut unsanitized_tx) =
+                    decode_and_deserialize::<VersionedTransaction>(data.clone(), binary_encoding)
+                        .map_err(|e| {
+                            Error::invalid_params(format!(
+                                "Failed to decode transaction at index {idx}: {e:?}"
+                            ))
+                        })?;
+
+                // Replace recent blockhash if requested
+                if replace_recent_blockhash {
+                    // Use bank.last_blockhash() which should always be in the hash_queue
+                    // The blockhash returned by last_blockhash() is the last_hash in the queue,
+                    // so it should always be valid. We use usize::MAX as max_age in load_and_execute_bundle
+                    // to ensure it passes validation even if the bank is historical.
+                    let recent_blockhash = bank.last_blockhash();
+                    unsanitized_tx
+                        .message
+                        .set_recent_blockhash(recent_blockhash);
+                }
+
+                let transaction =
+                    sanitize_transaction(unsanitized_tx, bank, bank.get_reserved_account_keys())
+                        .map_err(|e| {
+                            Error::invalid_params(format!(
+                                "Failed to sanitize transaction at index {idx}: {e:?}"
+                            ))
+                        })?;
+
+                if sig_verify {
+                    verify_transaction(&transaction)?;
+                }
+
+                sanitized_txs.push(RuntimeTransaction::try_create(
+                    transaction.to_versioned_transaction(),
+                    MessageHash::Compute,
+                    Some(false),
+                    bank,
+                    bank.get_reserved_account_keys(),
+                ).map_err(|err| Error::invalid_params(format!("invalid transaction: {err}")))?);
+            }
+
+            // Prepare pre/post execution accounts configs
+            let num_txs = sanitized_txs.len();
+            let pre_execution_accounts = pre_execution_accounts_configs
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| vec![None; num_txs])
+                .into_iter()
+                .map(|config| {
+                    config.map(|c| {
+                        c.addresses
+                            .iter()
+                            .map(|addr| verify_pubkey(addr))
+                            .collect::<Result<Vec<_>>>()
+                    })
+                    .transpose()
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            let post_execution_accounts = post_execution_accounts_configs
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| vec![None; num_txs])
+                .into_iter()
+                .map(|config| {
+                    config.map(|c| {
+                        c.addresses
+                            .iter()
+                            .map(|addr| verify_pubkey(addr))
+                            .collect::<Result<Vec<_>>>()
+                    })
+                    .transpose()
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            if pre_execution_accounts.len() != num_txs || post_execution_accounts.len() != num_txs {
+                return Err(Error::invalid_params(
+                    "pre_execution_accounts_configs and post_execution_accounts_configs must have the same length as transactions",
+                ));
+            }
+
+            // Prepare account encoding
+            let accounts_encoding = pre_execution_accounts_configs
+                .as_ref()
+                .and_then(|configs| {
+                    configs
+                        .iter()
+                        .find_map(|c| c.as_ref().and_then(|c| c.encoding))
+                })
+                .or_else(|| {
+                    post_execution_accounts_configs.as_ref().and_then(|configs| {
+                        configs
+                            .iter()
+                            .find_map(|c| c.as_ref().and_then(|c| c.encoding))
+                    })
+                })
+                .unwrap_or(UiAccountEncoding::Base64);
+
+            if accounts_encoding == UiAccountEncoding::Binary
+                || accounts_encoding == UiAccountEncoding::Base58
+            {
+                return Err(Error::invalid_params("base58 encoding not supported"));
+            }
+
+            // Build account overrides from RPC parameters
+            let mut account_overrides = solana_svm::account_overrides::AccountOverrides::default();
+            if let Some(overrides) = rpc_account_overrides {
+                for (pubkey_str, ui_account) in overrides {
+                    let pubkey = verify_pubkey(&pubkey_str)?;
+                    // Convert UiAccount to AccountSharedData
+                    let account_data = ui_account.decode::<AccountSharedData>().ok_or_else(|| {
+                        Error::invalid_params(format!(
+                            "Failed to decode account override for {pubkey_str}: account data encoding not supported or invalid"
+                        ))
+                    })?;
+                    account_overrides.set_account(&pubkey, Some(account_data));
+                }
+            }
+
+            // Each transaction needs 4 timestamps: ts_tx_start, ts_tx_load_end, ts_tx_end, ts_tx_preload_end
+            let mut timestamps = vec![0u64; 4 * num_txs];
+
+            // For simulation, use a larger max_age to allow blockhash replacement to work
+            // If replace_recent_blockhash is true, we've already replaced the blockhash with
+            // the bank's last_blockhash, so we should allow it to pass validation
+            let max_age = if replace_recent_blockhash {
+                // Use a very large max_age for simulation when blockhash is replaced
+                // This allows the replaced blockhash to pass validation
+                usize::MAX
+            } else {
+                MAX_PROCESSING_AGE
+            };
+
+            debug!(target: "simulateBundle", "simulateBundle[bank_slot={}]: max_age={max_age}", bank.slot());
+
+            // For simulation, we need to enable CPI recording if innerInstructions is requested
+            // transaction_status_sender_enabled controls general recording, but for simulation
+            // we specifically need to enable CPI recording when innerInstructions is true
+            let transaction_status_sender_enabled = true; // Always enable recording for simulation
+            let bundle_output = load_and_execute_bundle(
+                bank,
+                &sanitized_txs,
+                max_age,
+                transaction_status_sender_enabled,
+                &None, // log_messages_bytes_limit
+                Some(&mut account_overrides),
+                &pre_execution_accounts,
+                &post_execution_accounts,
+                None, // tip_accounts
+                &mut timestamps,
+            );
+
+            // Convert bundle output to RPC result
+            let mut transaction_results = Vec::new();
+            let mut bundle_err = None;
+
+            for (idx, bundle_tx_output) in bundle_output.bundle_transaction_results.iter().enumerate() {
+                let execution_results = bundle_tx_output.execution_results();
+                let pre_accounts = bundle_tx_output.pre_tx_execution_accounts();
+                let post_accounts = bundle_tx_output.post_tx_execution_accounts();
+
+                for (tx_idx, ((exec_result, pre_acc), post_acc)) in
+                    execution_results.iter().zip(pre_accounts.iter()).zip(post_accounts.iter()).enumerate()
+                {
+                    let global_idx = idx * execution_results.len() + tx_idx;
+                    
+                    let (err, logs, units_consumed, loaded_accounts_data_size, return_data, inner_instructions, fee, pre_balances, post_balances, pre_token_balances, post_token_balances, loaded_addresses) = match exec_result {
+                        Ok(ProcessedTransaction::Executed(executed)) => {
+                            let details = &executed.execution_details;
+                            let err = details.status.clone().err().map(Into::into);
+                            (
+                                err,
+                                details.log_messages.clone(),
+                                Some(details.executed_units),
+                                Some(executed.loaded_transaction.loaded_accounts_data_size),
+                                details.return_data.clone().map(|d| d.into()),
+                                if enable_cpi_recording {
+                                    details.inner_instructions.clone().map(|info| {
+                                        let account_keys = bundle_tx_output.transactions()[tx_idx].message().account_keys();
+                                        map_inner_instructions(info)
+                                            .map(|converted| parse_ui_inner_instructions(converted, &account_keys))
+                                            .collect()
+                                    })
+                                } else {
+                                    None
+                                },
+                                Some(executed.loaded_transaction.fee_details.total_fee()),
+                                None, // pre_balances - not available from bundle execution
+                                None, // post_balances - not available from bundle execution
+                                None, // pre_token_balances - not available from bundle execution
+                                None, // post_token_balances - not available from bundle execution
+                                Some(UiLoadedAddresses::from(&bundle_tx_output.transactions()[tx_idx].get_loaded_addresses())),
+                            )
+                        }
+                        Err(e) => {
+                            if bundle_err.is_none() {
+                                bundle_err = Some(format!("Transaction at index {global_idx} failed: {e:?}"));
+                            }
+                            (
+                                Some(e.clone().into()),
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            )
+                        }
+                        Ok(ProcessedTransaction::FeesOnly(_)) => {
+                            if bundle_err.is_none() {
+                                bundle_err = Some(format!("Transaction at index {global_idx} was fees only"));
+                            }
+                            (
+                                Some(solana_transaction_error::TransactionError::InvalidWritableAccount.into()),
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            )
+                        }
+                    };
+
+                    // Encode pre/post execution accounts
+                    let pre_execution_accounts_encoded = pre_acc.as_ref().map(|accounts| {
+                        accounts
+                            .iter()
+                            .map(|(pubkey, account)| {
+                                let mut account_map = HashMap::new();
+                                account_map.insert(*pubkey, account.clone());
+                                get_encoded_account(
+                                    bank,
+                                    pubkey,
+                                    accounts_encoding,
+                                    None,
+                                    Some(&account_map),
+                                )
+                            })
+                            .collect::<Result<Vec<_>>>()
+                    })
+                    .transpose()?;
+
+                    let post_execution_accounts_encoded = post_acc.as_ref().map(|accounts| {
+                        accounts
+                            .iter()
+                            .map(|(pubkey, account)| {
+                                let mut account_map = HashMap::new();
+                                account_map.insert(*pubkey, account.clone());
+                                get_encoded_account(
+                                    bank,
+                                    pubkey,
+                                    accounts_encoding,
+                                    None,
+                                    Some(&account_map),
+                                )
+                            })
+                            .collect::<Result<Vec<_>>>()
+                    })
+                    .transpose()?;
+
+                    transaction_results.push(RpcSimulateBundleTransactionResult {
+                        err,
+                        logs,
+                        pre_execution_accounts: pre_execution_accounts_encoded,
+                        post_execution_accounts: post_execution_accounts_encoded,
+                        units_consumed,
+                        loaded_accounts_data_size,
+                        return_data,
+                        inner_instructions,
+                        fee,
+                        pre_balances,
+                        post_balances,
+                        pre_token_balances,
+                        post_token_balances,
+                        loaded_addresses,
+                    });
+                }
+            }
+
+            // Check bundle-level error
+            if let Err(e) = &bundle_output.result {
+                bundle_err = Some(format!("Bundle execution failed: {e:?}"));
+            }
+
+            Ok(new_response(
+                bank,
+                RpcSimulateBundleResult {
+                    transactions: transaction_results,
+                    err: bundle_err,
                 },
             ))
         }
